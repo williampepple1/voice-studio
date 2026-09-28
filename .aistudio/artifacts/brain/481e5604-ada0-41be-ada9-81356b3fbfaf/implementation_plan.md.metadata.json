@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for VoiceSlice Studio — an audio dataset curation and annotation workstation tailored for TTS model training, featuring waveform slicing, looping segment transcription, audio normalization, and paired WAV + TXT export.",
+  "updatedAt":  "2026-09-28T07:45:33.079734609Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

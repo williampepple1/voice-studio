@@ -1,0 +1,8 @@
+{
+  "name": "VoiceSlice Studio",
+  "description": "Precision audio cutter, segment transcription annotator, and TTS dataset generator. Split audio clips, transcribe text, loop playback, and export paired WAV and TXT training pairs. for machine learning workflows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
