@@ -19,6 +19,7 @@ export interface ExportSettings {
   includeJson: boolean; // manifest.json
   filenamePrefix: string; // e.g. "clip_"
   applyDeReverb?: boolean; // Apply room reflection & echo suppression
+  applyMusicExtraction?: boolean; // Extract background music & isolate clean voice
 }
 
 export interface AudioPlaybackState {

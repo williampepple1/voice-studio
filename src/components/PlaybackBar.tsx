@@ -9,7 +9,8 @@ import {
   Volume2,
   VolumeX,
   Gauge,
-  Activity
+  Activity,
+  SlidersHorizontal
 } from 'lucide-react';
 import { formatTime } from '../utils/wavEncoder';
 import { AudioSegment } from '../types/audio';
@@ -22,6 +23,7 @@ interface PlaybackBarProps {
   totalDuration: number;
   playbackRate: number;
   volume: number;
+  autoGain: boolean;
   activeSegment: AudioSegment | null;
   hasAudio: boolean;
   onPlayPause: () => void;
@@ -32,6 +34,7 @@ interface PlaybackBarProps {
   onNextSegment: () => void;
   onChangePlaybackRate: (rate: number) => void;
   onChangeVolume: (volume: number) => void;
+  onToggleAutoGain: () => void;
   canPrevSegment: boolean;
   canNextSegment: boolean;
 }
@@ -43,6 +46,7 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
   totalDuration,
   playbackRate,
   volume,
+  autoGain,
   activeSegment,
   hasAudio,
   onPlayPause,
@@ -53,6 +57,7 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
   onNextSegment,
   onChangePlaybackRate,
   onChangeVolume,
+  onToggleAutoGain,
   canPrevSegment,
   canNextSegment,
 }) => {
@@ -69,6 +74,7 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
 
   const [peakHoldDb, setPeakHoldDb] = useState<number>(-90);
   const [hasClipped, setHasClipped] = useState<boolean>(false);
+  const [currentAutoGainDb, setCurrentAutoGainDb] = useState<number>(0);
   const peakHoldTimerRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
 
@@ -82,6 +88,7 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
 
       const levels = globalAudioEngine.getAudioLevels();
       setAudioLevels(levels);
+      setCurrentAutoGainDb(globalAudioEngine.getAutoGainDb());
 
       // Peak hold logic with smooth release
       if (levels.peakDb > peakHoldDb) {
@@ -302,6 +309,35 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
               {s}x
             </button>
           ))}
+          {/* Auto-Gain (Normalization) Toggle */}
+          <button
+            onClick={onToggleAutoGain}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-medium transition border shadow-sm ${
+              autoGain
+                ? 'bg-black text-white border-black'
+                : 'bg-neutral-100 text-neutral-600 hover:text-black border-neutral-300 hover:bg-neutral-200'
+            }`}
+            title={
+              autoGain
+                ? 'Auto-Gain is ON: Automatically levels out loudness differences between quiet and loud clips'
+                : 'Auto-Gain is OFF: Click to automatically normalize loudness across all clips during playback'
+            }
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            <span className="font-semibold text-[11px] hidden sm:inline">Auto-Gain</span>
+            <span
+              className={`text-[9px] px-1 py-0.5 rounded font-bold leading-none ${
+                autoGain ? 'bg-neutral-800 text-neutral-200' : 'bg-neutral-200 text-neutral-600'
+              }`}
+            >
+              {autoGain ? 'ON' : 'OFF'}
+            </span>
+            {autoGain && isPlaying && currentAutoGainDb !== 0 && (
+              <span className="text-[9px] text-neutral-400 font-mono hidden md:inline">
+                {currentAutoGainDb > 0 ? `+${currentAutoGainDb}` : currentAutoGainDb}dB
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Volume slider */}

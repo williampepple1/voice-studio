@@ -8,7 +8,10 @@ import {
   Sparkles,
   Layers,
   FileText,
-  Waves
+  Waves,
+  Music2,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { AudioMetadata } from '../types/audio';
 import { formatTime } from '../utils/wavEncoder';
@@ -22,7 +25,12 @@ interface HeaderProps {
   onOpenExportModal: () => void;
   onOpenHelpModal: () => void;
   onOpenDeReverbModal: () => void;
+  onOpenMusicExtractorModal: () => void;
   isLoadingAudio: boolean;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,7 +42,12 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExportModal,
   onOpenHelpModal,
   onOpenDeReverbModal,
+  onOpenMusicExtractorModal,
   isLoadingAudio,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -120,6 +133,29 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Open Audio</span>
           </button>
 
+          {/* Undo & Redo History Controls */}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg border border-neutral-300 bg-neutral-100 shadow-sm">
+            <button
+              onClick={onUndo}
+              disabled={!canUndo}
+              className="p-1.5 rounded-md text-neutral-700 hover:text-black hover:bg-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-neutral-700 transition"
+              title="Undo last action (Ctrl+Z / ⌘Z)"
+              aria-label="Undo"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+            </button>
+            <div className="w-px h-3.5 bg-neutral-300" />
+            <button
+              onClick={onRedo}
+              disabled={!canRedo}
+              className="p-1.5 rounded-md text-neutral-700 hover:text-black hover:bg-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-neutral-700 transition"
+              title="Redo action (Ctrl+Y / ⌘Shift+Z)"
+              aria-label="Redo"
+            >
+              <Redo2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
           {/* De-Reverb Room Cleaner Button */}
           <button
             onClick={onOpenDeReverbModal}
@@ -129,6 +165,17 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Waves className="w-3.5 h-3.5 text-black" />
             <span>De-Reverb</span>
+          </button>
+
+          {/* Extract Music & Vocal Isolation Button */}
+          <button
+            onClick={onOpenMusicExtractorModal}
+            disabled={!metadata || isLoadingAudio}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-neutral-900 bg-neutral-100 hover:bg-neutral-200 border border-neutral-300 disabled:opacity-30 disabled:hover:bg-neutral-100 transition shadow-sm"
+            title="Extract Music: strip background music & instrumentals to isolate clean speech (per-file and batch)"
+          >
+            <Music2 className="w-3.5 h-3.5 text-black" />
+            <span>Extract Music</span>
           </button>
 
           {/* Keyboard Shortcuts Help */}

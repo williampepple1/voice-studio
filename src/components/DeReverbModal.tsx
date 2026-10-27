@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Sparkles,
   X,
@@ -11,14 +11,20 @@ import {
   Waves,
   Zap,
   Download,
-  Info
+  CheckSquare,
+  Square,
+  Search,
+  Check,
+  Layers,
+  ArrowRight
 } from 'lucide-react';
 import {
   DeReverbSettings,
   DEFAULT_DEREVERB_SETTINGS,
   DEREVERB_PRESETS,
   createDeReverbPreview,
-  processDeReverbBuffer
+  processDeReverbBuffer,
+  batchDeReverbSegments
 } from '../utils/deReverb';
 import { AudioSegment } from '../types/audio';
 import { formatTime, encodeAudioSegmentToWav } from '../utils/wavEncoder';
@@ -27,45 +33,82 @@ interface DeReverbModalProps {
   isOpen: boolean;
   onClose: () => void;
   audioBuffer: AudioBuffer | null;
+  segments: AudioSegment[];
   activeSegment: AudioSegment | null;
-  onApplyToEntireTrack: (cleanedBuffer: AudioBuffer) => void;
-  onApplyToSegmentOnly: (segmentId: string, cleanedSegmentBuffer: AudioBuffer) => void;
+  onApplyBatch: (cleanedBuffer: AudioBuffer, processedSegmentIds?: string[]) => void;
 }
 
 export const DeReverbModal: React.FC<DeReverbModalProps> = ({
   isOpen,
   onClose,
   audioBuffer,
+  segments,
   activeSegment,
-  onApplyToEntireTrack,
-  onApplyToSegmentOnly,
+  onApplyBatch,
 }) => {
   const [settings, setSettings] = useState<DeReverbSettings>(DEFAULT_DEREVERB_SETTINGS);
   const [selectedPresetName, setSelectedPresetName] = useState<string>('Bedroom / Untreated Room');
 
-  // Preview state
+  // Scope mode: 'batch' (selected clips) vs 'full' (entire audio track)
+  const [targetScope, setTargetScope] = useState<'batch' | 'full'>('batch');
+
+  // Multi-segment selection state (Set of segment IDs)
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<string>>(() => {
+    // Default to active segment or all segments if none
+    if (activeSegment) {
+      return new Set([activeSegment.id]);
+    }
+    return new Set(segments.map((s) => s.id));
+  });
+
+  const [segmentSearchQuery, setSegmentSearchQuery] = useState('');
+
+  // Currently previewed segment for A/B testing
+  const [previewSegmentId, setPreviewSegmentId] = useState<string | null>(
+    activeSegment ? activeSegment.id : segments[0]?.id || null
+  );
+
+  // A/B Preview state
   const [previewMode, setPreviewMode] = useState<'dry' | 'wet'>('dry');
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [isLoopingPreview, setIsLoopingPreview] = useState(true);
   const [isProcessingPreview, setIsProcessingPreview] = useState(false);
-  const [isProcessingFull, setIsProcessingFull] = useState(false);
-  const [processingStatus, setProcessingStatus] = useState('');
+
+  // Batch execution progress
+  const [isProcessingBatch, setIsProcessingBatch] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(0);
+  const [batchStatusText, setBatchStatusText] = useState('');
 
   // Audio preview buffers
   const originalPreviewRef = useRef<AudioBuffer | null>(null);
   const cleanedPreviewRef = useRef<AudioBuffer | null>(null);
   const previewAudioCtxRef = useRef<AudioContext | null>(null);
   const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const previewStartAudioTimeRef = useRef<number>(0);
-  const previewOffsetRef = useRef<number>(0);
 
-  // Time region to preview
-  const previewStart = activeSegment ? activeSegment.startTime : 0;
-  const previewDuration = activeSegment
-    ? Math.min(10.0, Math.max(1.5, activeSegment.endTime - activeSegment.startTime))
+  // Re-synchronize default selected segments when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      if (activeSegment) {
+        setSelectedSegmentIds(new Set([activeSegment.id]));
+        setPreviewSegmentId(activeSegment.id);
+      } else if (segments.length > 0) {
+        setSelectedSegmentIds(new Set(segments.map((s) => s.id)));
+        setPreviewSegmentId(segments[0].id);
+      }
+    }
+  }, [isOpen, activeSegment, segments]);
+
+  // Target preview segment object
+  const currentPreviewSeg = useMemo(() => {
+    return segments.find((s) => s.id === previewSegmentId) || segments[0] || null;
+  }, [segments, previewSegmentId]);
+
+  const previewStart = currentPreviewSeg ? currentPreviewSeg.startTime : 0;
+  const previewDuration = currentPreviewSeg
+    ? Math.min(10.0, Math.max(1.5, currentPreviewSeg.endTime - currentPreviewSeg.startTime))
     : Math.min(8.0, audioBuffer ? audioBuffer.duration : 5.0);
 
-  // Initialize and re-generate preview when buffer or key settings change
+  // Generate / update A/B preview when preview target or settings change
   useEffect(() => {
     if (!isOpen || !audioBuffer) return;
 
@@ -82,9 +125,8 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
         if (!isCancelled) {
           originalPreviewRef.current = originalSlice;
           cleanedPreviewRef.current = cleanedSlice;
-          // If currently playing, seamlessly switch buffer
           if (isPlayingPreview) {
-            restartPlaybackWithCurrentBuffer();
+            startPlayback(previewMode);
           }
         }
       } catch (err) {
@@ -146,12 +188,7 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
 
     source.start(0);
     activeSourceRef.current = source;
-    previewStartAudioTimeRef.current = ctx.currentTime;
     setIsPlayingPreview(true);
-  };
-
-  const restartPlaybackWithCurrentBuffer = () => {
-    startPlayback(previewMode);
   };
 
   const togglePreviewPlay = () => {
@@ -180,75 +217,97 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
     }
   }, [isOpen]);
 
+  // Filtered segments for selection list
+  const filteredSegments = useMemo(() => {
+    return segments.filter((s) => {
+      const q = segmentSearchQuery.toLowerCase();
+      return s.id.toLowerCase().includes(q) || s.text.toLowerCase().includes(q);
+    });
+  }, [segments, segmentSearchQuery]);
+
+  // Selection toggle handlers
+  const handleToggleSelectSegment = (id: string) => {
+    setSelectedSegmentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    setSelectedSegmentIds(new Set(segments.map((s) => s.id)));
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedSegmentIds(new Set());
+  };
+
+  const handleSelectWithText = () => {
+    const withText = segments.filter((s) => s.text.trim().length > 0).map((s) => s.id);
+    setSelectedSegmentIds(new Set(withText));
+  };
+
+  const handleSelectWithoutText = () => {
+    const withoutText = segments.filter((s) => s.text.trim().length === 0).map((s) => s.id);
+    setSelectedSegmentIds(new Set(withoutText));
+  };
+
   if (!isOpen || !audioBuffer) return null;
 
-  // Apply to Entire Master Track
-  const handleApplyFullTrack = async () => {
-    setIsProcessingFull(true);
-    setProcessingStatus('De-reverberating master audio track...');
+  // Execute Batch Application
+  const handleExecuteDeReverb = async () => {
     stopPreview();
+    setIsProcessingBatch(true);
+    setBatchProgress(0);
 
     try {
-      // Yield to UI to show spinner
-      await new Promise((r) => setTimeout(r, 60));
-      const cleaned = await processDeReverbBuffer(audioBuffer, settings);
-      onApplyToEntireTrack(cleaned);
-      onClose();
-    } catch (err) {
-      console.error('Failed to de-reverb full track:', err);
-      alert('Error during de-reverberation processing.');
-    } finally {
-      setIsProcessingFull(false);
-      setProcessingStatus('');
-    }
-  };
+      if (targetScope === 'full') {
+        // Full track dereverberation
+        setBatchStatusText('De-reverberating full audio track (multi-band spectral subtraction)...');
+        await new Promise((r) => setTimeout(r, 60));
+        const cleaned = await processDeReverbBuffer(audioBuffer, settings);
+        onApplyBatch(cleaned);
+        onClose();
+      } else {
+        // Batch segments dereverberation
+        const selectedSegmentsList = segments.filter((s) => selectedSegmentIds.has(s.id));
+        if (selectedSegmentsList.length === 0) {
+          alert('Please select at least one segment to de-reverb.');
+          setIsProcessingBatch(false);
+          return;
+        }
 
-  // Apply to Selected Segment Only
-  const handleApplySegmentOnly = async () => {
-    if (!activeSegment) return;
-    setIsProcessingFull(true);
-    setProcessingStatus(`De-reverberating segment ${activeSegment.id}...`);
-    stopPreview();
+        const cleanedBuffer = await batchDeReverbSegments(
+          audioBuffer,
+          selectedSegmentsList,
+          settings,
+          (progress, currentSegId, current, total) => {
+            setBatchProgress(progress);
+            setBatchStatusText(`Processing ${current} of ${total}: ${currentSegId}`);
+          }
+        );
 
-    try {
-      await new Promise((r) => setTimeout(r, 60));
-
-      // Extract segment audio, de-reverb, and replace
-      const sampleRate = audioBuffer.sampleRate;
-      const startSample = Math.floor(activeSegment.startTime * sampleRate);
-      const endSample = Math.floor(activeSegment.endTime * sampleRate);
-      const segLength = endSample - startSample;
-
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const ctx = new AudioCtx();
-      const segBuffer = ctx.createBuffer(audioBuffer.numberOfChannels, segLength, sampleRate);
-
-      for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
-        const srcData = audioBuffer.getChannelData(c).subarray(startSample, endSample);
-        segBuffer.copyToChannel(srcData, c);
+        onApplyBatch(cleanedBuffer, Array.from(selectedSegmentIds));
+        onClose();
       }
-
-      const cleanedSeg = await processDeReverbBuffer(segBuffer, settings);
-      await ctx.close();
-
-      onApplyToSegmentOnly(activeSegment.id, cleanedSeg);
-      onClose();
     } catch (err) {
-      console.error('Failed to de-reverb segment:', err);
-      alert('Error during segment de-reverberation.');
+      console.error('Failed batch de-reverberation:', err);
+      alert('Error during batch de-reverberation processing.');
     } finally {
-      setIsProcessingFull(false);
-      setProcessingStatus('');
+      setIsProcessingBatch(false);
+      setBatchStatusText('');
     }
   };
 
-  // Direct download of de-reverbed WAV file
+  // Direct WAV export of cleaned audio
   const handleDownloadCleanWav = async () => {
-    setIsProcessingFull(true);
-    setProcessingStatus('Encoding de-reverbed master WAV...');
     stopPreview();
+    setIsProcessingBatch(true);
+    setBatchStatusText('Encoding master clean WAV...');
 
     try {
       await new Promise((r) => setTimeout(r, 60));
@@ -268,18 +327,19 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
-      console.error('Failed to download cleaned audio:', err);
+      console.error('Failed to export cleaned WAV:', err);
     } finally {
-      setIsProcessingFull(false);
-      setProcessingStatus('');
+      setIsProcessingBatch(false);
+      setBatchStatusText('');
     }
   };
 
   const estimatedDbReduction = Math.round((settings.strength / 100) * 12.5 * 10) / 10;
+  const numSelected = targetScope === 'full' ? segments.length : selectedSegmentIds.size;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="bg-white border border-neutral-200 rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
+      <div className="bg-white border border-neutral-200 rounded-2xl max-w-3xl w-full overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 bg-white border-b border-neutral-200">
           <div className="flex items-center gap-3">
@@ -289,20 +349,20 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-bold text-neutral-900 tracking-tight">
-                  Acoustic De-Reverb & Room Cleaner
+                  Batch De-Reverb & Room Acoustic Cleaner
                 </h2>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-neutral-100 text-neutral-700 font-semibold border border-neutral-200">
-                  DSP V2
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-neutral-100 text-neutral-800 font-semibold border border-neutral-200">
+                  Batch Multi-Clip
                 </span>
               </div>
               <p className="text-[11px] text-neutral-500">
-                Removes room reflections, standing waves, and echo tails from vocal recordings
+                Suppress room reflections and echo tails across multiple selected clips or entire track
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            disabled={isProcessingFull}
+            disabled={isProcessingBatch}
             className="p-1.5 rounded-lg text-neutral-400 hover:text-black hover:bg-neutral-100 transition"
           >
             <X className="w-4 h-4" />
@@ -311,12 +371,176 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-6 space-y-6 overflow-y-auto">
+          {/* Target Scope Selection & Multi-Segment Checklist */}
+          <div className="space-y-3 bg-neutral-50 p-4 rounded-xl border border-neutral-200">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-xs font-semibold text-neutral-900 flex items-center gap-1.5">
+                <Layers className="w-4 h-4 text-black" />
+                <span>Target Processing Scope:</span>
+              </span>
+
+              {/* Scope Switcher Tabs */}
+              <div className="flex items-center p-0.5 bg-neutral-200/80 rounded-lg border border-neutral-300">
+                <button
+                  onClick={() => setTargetScope('batch')}
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition ${
+                    targetScope === 'batch'
+                      ? 'bg-white text-black font-bold shadow-sm'
+                      : 'text-neutral-600 hover:text-black'
+                  }`}
+                >
+                  Selected Clips ({selectedSegmentIds.size} of {segments.length})
+                </button>
+                <button
+                  onClick={() => setTargetScope('full')}
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition ${
+                    targetScope === 'full'
+                      ? 'bg-black text-white font-bold shadow-sm'
+                      : 'text-neutral-600 hover:text-black'
+                  }`}
+                >
+                  Entire Audio Track ({segments.length} clips)
+                </button>
+              </div>
+            </div>
+
+            {/* If Batch Mode is selected, render segment checklist */}
+            {targetScope === 'batch' && (
+              <div className="space-y-2.5 pt-2 border-t border-neutral-200">
+                {/* Search & Quick selection actions */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="relative flex-1 min-w-[180px]">
+                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-neutral-400" />
+                    <input
+                      type="text"
+                      value={segmentSearchQuery}
+                      onChange={(e) => setSegmentSearchQuery(e.target.value)}
+                      placeholder="Filter clips by ID or text..."
+                      className="w-full bg-white border border-neutral-300 rounded-lg pl-8 pr-3 py-1 text-xs text-neutral-900 placeholder-neutral-400 focus:outline-none focus:border-black shadow-sm"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-[11px]">
+                    <button
+                      onClick={handleSelectAll}
+                      className="px-2 py-1 rounded bg-white hover:bg-neutral-100 text-neutral-700 hover:text-black border border-neutral-300 font-medium transition shadow-sm"
+                    >
+                      Select All ({segments.length})
+                    </button>
+                    <button
+                      onClick={handleDeselectAll}
+                      className="px-2 py-1 rounded bg-white hover:bg-neutral-100 text-neutral-700 hover:text-black border border-neutral-300 font-medium transition shadow-sm"
+                    >
+                      Deselect All
+                    </button>
+                    <button
+                      onClick={handleSelectWithText}
+                      className="px-2 py-1 rounded bg-white hover:bg-neutral-100 text-neutral-700 hover:text-black border border-neutral-300 font-medium transition shadow-sm"
+                    >
+                      Only Annotated
+                    </button>
+                  </div>
+                </div>
+
+                {/* Scrollable Segment Checklist Table */}
+                <div className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-inner max-h-48 overflow-y-auto divide-y divide-neutral-100">
+                  {filteredSegments.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-neutral-400">
+                      No segments match search query.
+                    </div>
+                  ) : (
+                    filteredSegments.map((seg) => {
+                      const isChecked = selectedSegmentIds.has(seg.id);
+                      const isCurrentPreview = seg.id === previewSegmentId;
+                      const segDuration = seg.endTime - seg.startTime;
+
+                      return (
+                        <div
+                          key={seg.id}
+                          onClick={() => handleToggleSelectSegment(seg.id)}
+                          className={`px-3 py-2 flex items-center justify-between gap-3 text-xs transition cursor-pointer select-none ${
+                            isChecked
+                              ? 'bg-neutral-50/80 hover:bg-neutral-100'
+                              : 'bg-white hover:bg-neutral-50 text-neutral-600'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {/* Checkbox */}
+                            <div className="shrink-0 text-black">
+                              {isChecked ? (
+                                <CheckSquare className="w-4 h-4 fill-black text-white" />
+                              ) : (
+                                <Square className="w-4 h-4 text-neutral-300" />
+                              )}
+                            </div>
+
+                            <span className="font-mono font-semibold text-neutral-900 min-w-[70px]">
+                              {seg.id}
+                            </span>
+
+                            <span className="text-[11px] font-mono text-neutral-500 min-w-[45px]">
+                              {segDuration.toFixed(2)}s
+                            </span>
+
+                            <span className="text-[11px] text-neutral-400 font-mono hidden sm:inline">
+                              {formatTime(seg.startTime)} → {formatTime(seg.endTime)}
+                            </span>
+
+                            <span className="text-neutral-300 mx-1 hidden sm:inline">·</span>
+
+                            <p className="text-[11px] text-neutral-600 truncate max-w-[220px]">
+                              {seg.text.trim().length > 0 ? (
+                                seg.text
+                              ) : (
+                                <span className="italic text-neutral-400">No transcript</span>
+                              )}
+                            </p>
+                          </div>
+
+                          {/* Quick Audition Button */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPreviewSegmentId(seg.id);
+                              if (!isPlayingPreview) {
+                                startPlayback(previewMode);
+                              }
+                            }}
+                            className={`px-2 py-1 rounded text-[11px] font-medium transition flex items-center gap-1 border shrink-0 ${
+                              isCurrentPreview
+                                ? 'bg-black text-white border-black font-semibold'
+                                : 'bg-white text-neutral-700 hover:text-black border-neutral-200 hover:bg-neutral-100'
+                            }`}
+                            title="Audition this specific segment in the A/B preview deck"
+                          >
+                            <Volume2 className="w-3 h-3" />
+                            <span>{isCurrentPreview ? 'Auditioning' : 'Audition'}</span>
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] text-neutral-500 font-mono px-1">
+                  <span>
+                    Selected for De-Reverb:{' '}
+                    <strong className="text-black font-bold">
+                      {selectedSegmentIds.size} of {segments.length} clips
+                    </strong>
+                  </span>
+                  <span>Click "Audition" on any row to test in real time</span>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Real-time A/B Interactive Audio Preview Monitor */}
           <div className="bg-neutral-50 p-4 rounded-xl border border-neutral-200 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-neutral-900 flex items-center gap-1.5">
                 <Volume2 className="w-4 h-4 text-black" />
-                <span>Instant A/B Audio Comparison</span>
+                <span>Audition Preview ({currentPreviewSeg?.id || 'Clip'})</span>
                 {isProcessingPreview && (
                   <span className="text-[10px] text-neutral-500 font-mono animate-pulse">
                     (recalculating...)
@@ -359,11 +583,10 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
                 </button>
 
                 <div className="text-xs font-mono text-neutral-500 pl-1">
-                  Preview:{' '}
-                  <span className="text-black font-semibold">
-                    {previewDuration.toFixed(1)}s
-                  </span>{' '}
-                  {activeSegment ? `(${activeSegment.id})` : ''}
+                  Previewing:{' '}
+                  <span className="text-black font-semibold font-mono">
+                    {currentPreviewSeg?.id} ({previewDuration.toFixed(1)}s)
+                  </span>
                 </div>
               </div>
 
@@ -391,11 +614,6 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
                 </button>
               </div>
             </div>
-
-            <p className="text-[11px] text-neutral-500 leading-normal">
-              Click play and toggle between <strong>[A] Original</strong> and{' '}
-              <strong>[B] Cleaned</strong> to hear the room echo disappear.
-            </p>
           </div>
 
           {/* Acoustic Presets */}
@@ -509,7 +727,7 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
                     Consonant & Phoneme Protection:
                   </span>
                   <span className="text-[11px] text-neutral-500 ml-2">
-                    Prevents muffling speech attacks
+                    Protects speech attacks and consonants
                   </span>
                 </div>
                 <span className="font-mono font-bold text-neutral-900">
@@ -587,12 +805,18 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
             </div>
           </div>
 
-          {/* Processing Progress banner */}
-          {isProcessingFull && (
-            <div className="p-4 bg-neutral-50 rounded-xl border border-neutral-200 flex items-center gap-3">
-              <div className="w-5 h-5 rounded-full border-2 border-neutral-300 border-t-black animate-spin shrink-0" />
-              <div className="text-xs text-neutral-800 font-mono font-medium">
-                {processingStatus}
+          {/* Batch Progress Bar */}
+          {isProcessingBatch && (
+            <div className="p-4 bg-neutral-50 rounded-xl border border-neutral-200 space-y-2">
+              <div className="flex items-center justify-between text-xs font-mono">
+                <span className="font-semibold text-neutral-900">{batchStatusText}</span>
+                <span className="text-neutral-600 font-bold">{batchProgress}%</span>
+              </div>
+              <div className="w-full h-2 bg-neutral-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-black transition-all duration-75"
+                  style={{ width: `${batchProgress}%` }}
+                />
               </div>
             </div>
           )}
@@ -603,16 +827,16 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
-              disabled={isProcessingFull}
+              disabled={isProcessingBatch}
               className="px-4 py-2 text-xs font-medium text-neutral-600 hover:text-black transition"
             >
               Cancel
             </button>
 
-            {/* Direct WAV Download */}
+            {/* Direct Master WAV Download */}
             <button
               onClick={handleDownloadCleanWav}
-              disabled={isProcessingFull}
+              disabled={isProcessingBatch}
               className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium text-neutral-700 bg-white hover:bg-neutral-100 hover:text-black border border-neutral-300 transition shadow-sm"
               title="Download clean processed master audio as WAV"
             >
@@ -622,27 +846,22 @@ export const DeReverbModal: React.FC<DeReverbModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Apply to Current Segment Only */}
-            {activeSegment && (
-              <button
-                onClick={handleApplySegmentOnly}
-                disabled={isProcessingFull}
-                className="px-3.5 py-2 rounded-lg bg-neutral-200 hover:bg-neutral-300 text-neutral-900 font-semibold text-xs border border-neutral-300 transition shadow-sm"
-                title={`Only de-reverb segment ${activeSegment.id}`}
-              >
-                Apply to Clip ({activeSegment.id})
-              </button>
-            )}
-
-            {/* Apply to Entire Audio Track */}
+            {/* Primary Action Button */}
             <button
-              onClick={handleApplyFullTrack}
-              disabled={isProcessingFull}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white font-semibold text-xs shadow-sm transition"
-              title="De-reverb the entire audio file across all segments"
+              onClick={handleExecuteDeReverb}
+              disabled={isProcessingBatch || (targetScope === 'batch' && selectedSegmentIds.size === 0)}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-black hover:bg-neutral-800 text-white font-semibold text-xs shadow-sm disabled:opacity-30 disabled:hover:bg-black transition"
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>Apply to Entire Track</span>
+              <span>
+                {isProcessingBatch
+                  ? 'Processing...'
+                  : targetScope === 'full'
+                  ? `De-Reverb Entire Track (${segments.length} clips)`
+                  : `De-Reverb ${selectedSegmentIds.size} Selected Clip${
+                      selectedSegmentIds.size === 1 ? '' : 's'
+                    }`}
+              </span>
             </button>
           </div>
         </div>

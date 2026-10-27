@@ -4,6 +4,7 @@
  */
 
 import { deReverbChannel, DEFAULT_DEREVERB_SETTINGS } from './deReverb';
+import { extractMusicFromChannelData, DEFAULT_MUSIC_SETTINGS } from './musicExtractor';
 
 export interface EncodeWavOptions {
   sampleRate: number; // e.g. 22050, 24000, 44100
@@ -12,6 +13,7 @@ export interface EncodeWavOptions {
   targetPeakDb?: number; // e.g. -1 dB
   microFade?: boolean; // 5ms fade in/out to eliminate cut pops
   deReverb?: boolean; // Apply room reflection & echo suppression
+  extractMusic?: boolean; // Extract background music & isolate vocal speech
 }
 
 /**
@@ -69,6 +71,18 @@ export async function encodeAudioSegmentToWav(
   if (options.deReverb) {
     for (let c = 0; c < numChannels; c++) {
       channelData[c] = deReverbChannel(channelData[c], targetSampleRate, DEFAULT_DEREVERB_SETTINGS);
+    }
+  }
+
+  // Music Extraction & Vocal Isolation (Background music removal)
+  if (options.extractMusic) {
+    const { vocalChannels } = extractMusicFromChannelData(
+      channelData,
+      targetSampleRate,
+      DEFAULT_MUSIC_SETTINGS
+    );
+    for (let c = 0; c < numChannels; c++) {
+      channelData[c] = vocalChannels[c] || vocalChannels[0];
     }
   }
 

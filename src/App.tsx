@@ -6,6 +6,7 @@ import { SegmentList } from './components/SegmentList';
 import { ExportModal } from './components/ExportModal';
 import { HelpModal } from './components/HelpModal';
 import { DeReverbModal } from './components/DeReverbModal';
+import { MusicExtractorModal } from './components/MusicExtractorModal';
 import { AudioDropzone } from './components/AudioDropzone';
 import { AudioSegment, ExportSettings, AudioMetadata, BulkRenameOptions } from './types/audio';
 import { globalAudioEngine } from './utils/audioEngine';
@@ -25,6 +26,7 @@ export default function App() {
   const [isLooping, setIsLooping] = useState<boolean>(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [volume, setVolume] = useState<number>(1.0);
+  const [autoGain, setAutoGain] = useState<boolean>(true);
 
   // UI state
   const [isLoadingAudio, setIsLoadingAudio] = useState<boolean>(false);
@@ -32,6 +34,109 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
   const [isHelpModalOpen, setIsHelpModalOpen] = useState<boolean>(false);
   const [isDeReverbModalOpen, setIsDeReverbModalOpen] = useState<boolean>(false);
+  const [isMusicExtractorModalOpen, setIsMusicExtractorModalOpen] = useState<boolean>(false);
+
+  // Undo / Redo History Stack for tracking changes to segments
+  interface HistorySnapshot {
+    segments: AudioSegment[];
+    activeSegmentId: string | null;
+    description: string;
+  }
+  const MAX_HISTORY_STEPS = 60;
+  const [past, setPast] = useState<HistorySnapshot[]>([]);
+  const [future, setFuture] = useState<HistorySnapshot[]>([]);
+
+  // Keep references to latest state to avoid stale closure snapshots
+  const segmentsRef = useRef<AudioSegment[]>(segments);
+  segmentsRef.current = segments;
+  const activeSegmentIdRef = useRef<string | null>(activeSegmentId);
+  activeSegmentIdRef.current = activeSegmentId;
+
+  // Debounce refs for boundary dragging and transcription typing
+  const isAdjustingBoundaryRef = useRef(false);
+  const boundaryDebounceTimerRef = useRef<number | null>(null);
+  const isEditingTextRef = useRef(false);
+  const textDebounceTimerRef = useRef<number | null>(null);
+
+  // Record an undo snapshot before an action takes place
+  const recordHistory = useCallback((description = 'Modify segments') => {
+    setPast((prev) => [
+      ...prev.slice(-MAX_HISTORY_STEPS),
+      {
+        segments: segmentsRef.current,
+        activeSegmentId: activeSegmentIdRef.current,
+        description,
+      },
+    ]);
+    setFuture([]); // clear redo on new action
+  }, []);
+
+  // Undo action
+  const handleUndo = useCallback(() => {
+    setPast((prevPast) => {
+      if (prevPast.length === 0) return prevPast;
+      const previous = prevPast[prevPast.length - 1];
+      const newPast = prevPast.slice(0, prevPast.length - 1);
+
+      setFuture((prevFuture) => [
+        ...prevFuture,
+        {
+          segments: segmentsRef.current,
+          activeSegmentId: activeSegmentIdRef.current,
+          description: previous.description,
+        },
+      ]);
+
+      setSegments(previous.segments);
+      if (
+        previous.activeSegmentId &&
+        previous.segments.some((s) => s.id === previous.activeSegmentId)
+      ) {
+        setActiveSegmentId(previous.activeSegmentId);
+      } else if (previous.segments.length > 0) {
+        setActiveSegmentId(previous.segments[0].id);
+      }
+      return newPast;
+    });
+  }, []);
+
+  // Redo action
+  const handleRedo = useCallback(() => {
+    setFuture((prevFuture) => {
+      if (prevFuture.length === 0) return prevFuture;
+      const next = prevFuture[prevFuture.length - 1];
+      const newFuture = prevFuture.slice(0, prevFuture.length - 1);
+
+      setPast((prevPast) => [
+        ...prevPast,
+        {
+          segments: segmentsRef.current,
+          activeSegmentId: activeSegmentIdRef.current,
+          description: next.description,
+        },
+      ]);
+
+      setSegments(next.segments);
+      if (
+        next.activeSegmentId &&
+        next.segments.some((s) => s.id === next.activeSegmentId)
+      ) {
+        setActiveSegmentId(next.activeSegmentId);
+      } else if (next.segments.length > 0) {
+        setActiveSegmentId(next.segments[0].id);
+      }
+      return newFuture;
+    });
+  }, []);
+
+  // Sync auto-gain settings and segment boundaries with audio engine
+  useEffect(() => {
+    globalAudioEngine.setAutoGain(autoGain);
+  }, [autoGain]);
+
+  useEffect(() => {
+    globalAudioEngine.setSegments(segments);
+  }, [segments]);
 
   // Export settings (defaults tuned for standard TTS training pipelines like Piper / VITS)
   const [exportSettings, setExportSettings] = useState<ExportSettings>({
@@ -121,6 +226,8 @@ export default function App() {
 
       setSegments(initialSegments);
       setActiveSegmentId(initialSegments[0]?.id || null);
+      setPast([]);
+      setFuture([]);
     } catch (err) {
       console.error('Failed to decode audio:', err);
       alert('Could not decode this audio file. Please ensure it is a valid audio format.');
@@ -130,21 +237,25 @@ export default function App() {
     }
   };
 
-  // Generate and load demo speech track
-  const handleLoadDemoTrack = async () => {
+  // Generate and load demo speech track (clean or with music bed)
+  const handleLoadDemoTrack = async (withMusic = false) => {
     setIsLoadingAudio(true);
-    setLoadingMessage('Synthesizing demo speech segments...');
+    setLoadingMessage(withMusic ? 'Synthesizing demo speech with background music bed...' : 'Synthesizing demo speech segments...');
     try {
       const ctx = globalAudioEngine.getContext();
-      const { buffer, suggestedCuts } = await generateDemoAudioBuffer(ctx, (msg) => {
-        setLoadingMessage(msg);
-      });
+      const { buffer, suggestedCuts } = await generateDemoAudioBuffer(
+        ctx,
+        (msg) => {
+          setLoadingMessage(msg);
+        },
+        withMusic
+      );
 
       setAudioBuffer(buffer);
       globalAudioEngine.setBuffer(buffer);
 
       const meta: AudioMetadata = {
-        name: 'demo_tts_training_sample.wav',
+        name: withMusic ? 'demo_speech_with_music.wav' : 'demo_tts_training_sample.wav',
         duration: buffer.duration,
         sampleRate: buffer.sampleRate,
         numberOfChannels: buffer.numberOfChannels,
@@ -161,6 +272,8 @@ export default function App() {
 
       setSegments(demoSegments);
       setActiveSegmentId(demoSegments[0]?.id || null);
+      setPast([]);
+      setFuture([]);
     } catch (err) {
       console.error('Error generating demo track:', err);
       alert('Could not generate demo track.');
@@ -172,7 +285,7 @@ export default function App() {
 
   // Add a split marker at a specific time
   const handleAddSplit = useCallback(
-    (splitTime: number) => {
+    (splitTime: number, selectSecondClip = false) => {
       if (!audioBuffer) return;
       const duration = audioBuffer.duration;
       const t = Math.max(0.05, Math.min(duration - 0.05, splitTime));
@@ -188,6 +301,8 @@ export default function App() {
         }
 
         const target = prev[targetIndex];
+        recordHistory(`Split ${target.id}`);
+
         const segA: AudioSegment = {
           ...target,
           endTime: Number(t.toFixed(3)),
@@ -208,15 +323,23 @@ export default function App() {
           id: `clip_${String(idx + 1).padStart(3, '0')}`,
         }));
 
-        setActiveSegmentId(segA.id);
+        const chosenSegment = selectSecondClip
+          ? reindexed[targetIndex + 1]
+          : reindexed[targetIndex];
+
+        if (chosenSegment) {
+          setActiveSegmentId(chosenSegment.id);
+          globalAudioEngine.seekTo(chosenSegment.startTime);
+        }
         return reindexed;
       });
     },
-    [audioBuffer]
+    [audioBuffer, recordHistory]
   );
 
   // Delete split boundary between segment i and i+1 (merging them)
   const handleDeleteSplit = useCallback((index: number) => {
+    recordHistory('Merge clips');
     setSegments((prev) => {
       if (index < 0 || index >= prev.length - 1) return prev;
       const segA = prev[index];
@@ -242,7 +365,7 @@ export default function App() {
         id: `clip_${String(idx + 1).padStart(3, '0')}`,
       }));
     });
-  }, []);
+  }, [recordHistory]);
 
   // Split specific segment in half
   const handleSplitInHalf = (id: string) => {
@@ -252,19 +375,41 @@ export default function App() {
     handleAddSplit(mid);
   };
 
-  // Update segment text transcript
+  // Update segment text transcript with typing debounce for undo grouping
   const handleUpdateSegmentText = (id: string, text: string) => {
+    if (!isEditingTextRef.current) {
+      recordHistory('Edit transcript');
+      isEditingTextRef.current = true;
+    }
+    if (textDebounceTimerRef.current) {
+      clearTimeout(textDebounceTimerRef.current);
+    }
+    textDebounceTimerRef.current = window.setTimeout(() => {
+      isEditingTextRef.current = false;
+    }, 1000);
+
     setSegments((prev) =>
       prev.map((s) => (s.id === id ? { ...s, text } : s))
     );
   };
 
-  // Update segment boundary times
+  // Update segment boundary times with debounce for smooth drag undo grouping
   const handleUpdateSegmentTimes = (
     id: string,
     startTime: number,
     endTime: number
   ) => {
+    if (!isAdjustingBoundaryRef.current) {
+      recordHistory('Adjust clip boundary');
+      isAdjustingBoundaryRef.current = true;
+    }
+    if (boundaryDebounceTimerRef.current) {
+      clearTimeout(boundaryDebounceTimerRef.current);
+    }
+    boundaryDebounceTimerRef.current = window.setTimeout(() => {
+      isAdjustingBoundaryRef.current = false;
+    }, 400);
+
     setSegments((prev) =>
       prev.map((s) =>
         s.id === id
@@ -280,11 +425,12 @@ export default function App() {
 
   // Delete individual segment (removes and expands neighbors)
   const handleDeleteSegment = (id: string) => {
+    if (segments.length <= 1) {
+      alert("Cannot delete the only segment. At least one segment must remain.");
+      return;
+    }
+    recordHistory(`Delete clip ${id}`);
     setSegments((prev) => {
-      if (prev.length <= 1) {
-        alert("Cannot delete the only segment. At least one segment must remain.");
-        return prev;
-      }
       const idx = prev.findIndex((s) => s.id === id);
       if (idx === -1) return prev;
 
@@ -335,6 +481,8 @@ export default function App() {
       return;
     }
 
+    recordHistory('Auto-detect silence splits');
+
     const newSegments: AudioSegment[] = cuts.map((cut, idx) => ({
       id: `clip_${String(idx + 1).padStart(3, '0')}`,
       startTime: cut.startTime,
@@ -366,12 +514,14 @@ export default function App() {
       idx++;
     }
 
+    recordHistory('Split by regular interval');
     setSegments(newSegments);
     setActiveSegmentId(newSegments[0]?.id || null);
   };
 
   // Import TXT script lines (pasting line by line into segments)
   const handleImportScriptFile = (lines: string[]) => {
+    recordHistory('Import script transcript');
     setSegments((prev) => {
       return prev.map((seg, idx) => ({
         ...seg,
@@ -382,6 +532,7 @@ export default function App() {
 
   // Bulk rename all segments with prefix, padding, and start number
   const handleBulkRename = (options: BulkRenameOptions) => {
+    recordHistory('Bulk rename clips');
     setSegments((prev) => {
       const activeIdx = prev.findIndex((s) => s.id === activeSegmentId);
       const renamed = prev.map((seg, idx) => {
@@ -484,6 +635,27 @@ export default function App() {
         target.tagName === 'TEXTAREA' ||
         target.isContentEditable;
 
+      // Undo: Ctrl+Z / Cmd+Z (without Shift)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        if (!isTyping) {
+          e.preventDefault();
+          handleUndo();
+          return;
+        }
+      }
+
+      // Redo: Ctrl+Shift+Z / Cmd+Shift+Z or Ctrl+Y / Cmd+Y
+      if (
+        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && e.shiftKey) ||
+        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y')
+      ) {
+        if (!isTyping) {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+      }
+
       if (e.key === ' ' && !isTyping) {
         e.preventDefault();
         handlePlayPause();
@@ -508,50 +680,21 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   });
 
-  // De-Reverb: Apply to entire master audio buffer
-  const handleApplyDeReverbToEntireTrack = (cleanedBuffer: AudioBuffer) => {
+  // De-Reverb: Apply cleaned audio buffer to state (single, batch, or full-track)
+  const handleApplyDeReverbBatch = (cleanedBuffer: AudioBuffer, _processedSegmentIds?: string[]) => {
     setAudioBuffer(cleanedBuffer);
     globalAudioEngine.setBuffer(cleanedBuffer);
   };
 
-  // De-Reverb: Apply to selected segment only
-  const handleApplyDeReverbToSegmentOnly = (segmentId: string, cleanedSegmentBuffer: AudioBuffer) => {
-    if (!audioBuffer) return;
-    const targetSegment = segments.find((s) => s.id === segmentId);
-    if (!targetSegment) return;
-
-    const sampleRate = audioBuffer.sampleRate;
-    const startSample = Math.floor(targetSegment.startTime * sampleRate);
-    const segSamples = cleanedSegmentBuffer.length;
-
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const ctx = new AudioCtx();
-    const newBuffer = ctx.createBuffer(
-      audioBuffer.numberOfChannels,
-      audioBuffer.length,
-      sampleRate
+  // Music Extraction: Apply vocal isolated audio buffer to state (per-clip, batch, or full-track)
+  const handleApplyMusicExtractionBatch = (cleanedBuffer: AudioBuffer, processedSegmentIds?: string[]) => {
+    recordHistory(
+      processedSegmentIds && processedSegmentIds.length > 0
+        ? `Extract music from ${processedSegmentIds.length} clips`
+        : 'Extract music from entire track'
     );
-
-    for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
-      const originalData = audioBuffer.getChannelData(c);
-      const cleanSegData = cleanedSegmentBuffer.getChannelData(
-        Math.min(c, cleanedSegmentBuffer.numberOfChannels - 1)
-      );
-
-      const newChannelData = new Float32Array(originalData);
-      for (let i = 0; i < segSamples; i++) {
-        if (startSample + i < newChannelData.length) {
-          newChannelData[startSample + i] = cleanSegData[i];
-        }
-      }
-      newBuffer.getChannelData(c).set(newChannelData);
-    }
-    ctx.close().catch(() => {});
-
-    setAudioBuffer(newBuffer);
-    globalAudioEngine.setBuffer(newBuffer);
+    setAudioBuffer(cleanedBuffer);
+    globalAudioEngine.setBuffer(cleanedBuffer);
   };
 
   const annotatedCount = segments.filter((s) => s.text.trim().length > 0).length;
@@ -568,7 +711,12 @@ export default function App() {
         onOpenExportModal={() => setIsExportModalOpen(true)}
         onOpenHelpModal={() => setIsHelpModalOpen(true)}
         onOpenDeReverbModal={() => setIsDeReverbModalOpen(true)}
+        onOpenMusicExtractorModal={() => setIsMusicExtractorModalOpen(true)}
         isLoadingAudio={isLoadingAudio}
+        canUndo={past.length > 0}
+        canRedo={future.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
       />
 
       {/* Main Workspace */}
@@ -577,7 +725,8 @@ export default function App() {
           /* Empty / Upload State */
           <AudioDropzone
             onFileSelected={handleLoadAudioFile}
-            onLoadDemoTrack={handleLoadDemoTrack}
+            onLoadDemoTrack={() => handleLoadDemoTrack(false)}
+            onLoadDemoWithMusic={() => handleLoadDemoTrack(true)}
             isLoading={isLoadingAudio}
             loadingMessage={loadingMessage}
           />
@@ -603,6 +752,7 @@ export default function App() {
               onDeleteSplit={handleDeleteSplit}
               onAutoDetectSilence={handleAutoDetectSilence}
               onOpenDeReverb={() => setIsDeReverbModalOpen(true)}
+              onOpenMusicExtractor={() => setIsMusicExtractorModalOpen(true)}
             />
 
             {/* Sticky Audio Transport & Segment Loop Controls */}
@@ -613,6 +763,7 @@ export default function App() {
               totalDuration={audioBuffer.duration}
               playbackRate={playbackRate}
               volume={volume}
+              autoGain={autoGain}
               activeSegment={activeSegment}
               hasAudio={!!audioBuffer}
               onPlayPause={handlePlayPause}
@@ -623,6 +774,7 @@ export default function App() {
               onNextSegment={handleNextSegment}
               onChangePlaybackRate={handleChangePlaybackRate}
               onChangeVolume={handleChangeVolume}
+              onToggleAutoGain={() => setAutoGain((p) => !p)}
               canPrevSegment={canPrev}
               canNextSegment={canNext}
             />
@@ -633,8 +785,16 @@ export default function App() {
               activeSegmentId={activeSegmentId}
               isPlaying={isPlaying}
               isLooping={isLooping}
+              currentTime={currentTime}
               audioBuffer={audioBuffer}
               exportSettings={exportSettings}
+              canUndo={past.length > 0}
+              canRedo={future.length > 0}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              onOpenMusicExtractor={() => setIsMusicExtractorModalOpen(true)}
+              onSeek={handleSeek}
+              onAddSplit={handleAddSplit}
               onSelectSegment={(id) => {
                 setActiveSegmentId(id);
                 const seg = segments.find((s) => s.id === id);
@@ -686,9 +846,20 @@ export default function App() {
         isOpen={isDeReverbModalOpen}
         onClose={() => setIsDeReverbModalOpen(false)}
         audioBuffer={audioBuffer}
+        segments={segments}
         activeSegment={segments.find((s) => s.id === activeSegmentId) || null}
-        onApplyToEntireTrack={handleApplyDeReverbToEntireTrack}
-        onApplyToSegmentOnly={handleApplyDeReverbToSegmentOnly}
+        onApplyBatch={handleApplyDeReverbBatch}
+      />
+
+      {/* Music Extraction & Vocal Isolator Modal (Per-File & Batch) */}
+      <MusicExtractorModal
+        isOpen={isMusicExtractorModalOpen}
+        onClose={() => setIsMusicExtractorModalOpen(false)}
+        audioBuffer={audioBuffer}
+        segments={segments}
+        activeSegment={segments.find((s) => s.id === activeSegmentId) || null}
+        onApplyBatch={handleApplyMusicExtractionBatch}
+        onLoadFileToWorkspace={handleLoadAudioFile}
       />
     </div>
   );

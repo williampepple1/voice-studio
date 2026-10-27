@@ -20,20 +20,37 @@ import {
   Mic,
   CheckCircle2,
   Clock,
-  ChevronRight
+  ChevronRight,
+  Undo2,
+  Redo2,
+  Sparkles,
+  Loader2,
+  Check,
+  Wand2,
+  Music2,
 } from 'lucide-react';
+import { SegmentWaveformEditor } from './SegmentWaveformEditor';
 import { formatTime, encodeAudioSegmentToWav } from '../utils/wavEncoder';
+import { getDraftTranscription } from '../utils/aiTranscriber';
 
 interface SegmentListProps {
   segments: AudioSegment[];
   activeSegmentId: string | null;
   isPlaying: boolean;
   isLooping: boolean;
+  currentTime?: number;
   audioBuffer: AudioBuffer | null;
   exportSettings: ExportSettings;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  onOpenMusicExtractor?: () => void;
   onSelectSegment: (id: string) => void;
   onPlaySegment: (id: string, loop?: boolean) => void;
   onStop: () => void;
+  onSeek?: (time: number) => void;
+  onAddSplit?: (time: number, selectSecondClip?: boolean) => void;
   onUpdateSegmentText: (id: string, text: string) => void;
   onUpdateSegmentTimes: (id: string, startTime: number, endTime: number) => void;
   onDeleteSegment: (id: string) => void;
@@ -48,11 +65,19 @@ export const SegmentList: React.FC<SegmentListProps> = ({
   activeSegmentId,
   isPlaying,
   isLooping,
+  currentTime = 0,
   audioBuffer,
   exportSettings,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
+  onOpenMusicExtractor,
   onSelectSegment,
   onPlaySegment,
   onStop,
+  onSeek,
+  onAddSplit,
   onUpdateSegmentText,
   onUpdateSegmentTimes,
   onDeleteSegment,
@@ -68,12 +93,63 @@ export const SegmentList: React.FC<SegmentListProps> = ({
   const [intervalSeconds, setIntervalSeconds] = useState(4.0);
   const [isDictating, setIsDictating] = useState(false);
   const [isDownloadingSingle, setIsDownloadingSingle] = useState(false);
+  const [isDrafting, setIsDrafting] = useState(false);
+  const [draftGuess, setDraftGuess] = useState<{ text: string; segmentId: string; model?: string } | null>(null);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [autoDraftOnClick, setAutoDraftOnClick] = useState(true);
+  const [appliedDraftStatus, setAppliedDraftStatus] = useState<string | null>(null);
 
   // Active segment object
   const activeSegment = useMemo(
     () => segments.find((s) => s.id === activeSegmentId) || segments[0] || null,
     [segments, activeSegmentId]
   );
+
+  // Trigger AI Draft Transcription for a given segment
+  const handleGenerateDraft = async (
+    targetSeg: AudioSegment | null = activeSegment,
+    autoApplyIfEmpty = false
+  ) => {
+    if (!targetSeg || !audioBuffer || isDrafting) return;
+
+    setIsDrafting(true);
+    setDraftError(null);
+    setAppliedDraftStatus(null);
+
+    const result = await getDraftTranscription(
+      audioBuffer,
+      targetSeg.startTime,
+      targetSeg.endTime,
+      targetSeg.id
+    );
+
+    setIsDrafting(false);
+
+    if (result.text) {
+      setDraftGuess({ text: result.text, segmentId: targetSeg.id, model: result.model });
+      // If segment transcript is empty and autoApply was requested, populate directly
+      if (autoApplyIfEmpty && targetSeg.text.trim().length === 0) {
+        onUpdateSegmentText(targetSeg.id, result.text);
+        setAppliedDraftStatus(`Applied AI draft: "${result.text}"`);
+        setTimeout(() => setAppliedDraftStatus(null), 3500);
+      }
+    } else if (result.error) {
+      setDraftError(result.error);
+    }
+  };
+
+  // Called when user clicks or focuses the transcription field
+  const handleTranscriptionFieldClick = () => {
+    if (!activeSegment || !audioBuffer) return;
+    if (autoDraftOnClick && !isDrafting) {
+      if (activeSegment.text.trim().length === 0) {
+        handleGenerateDraft(activeSegment, true);
+      } else if (!draftGuess || draftGuess.segmentId !== activeSegment.id) {
+        // Pre-fetch draft in background so suggestion is available without overwriting
+        handleGenerateDraft(activeSegment, false);
+      }
+    }
+  };
 
   // Filtered segments for right sequence column
   const filteredSegments = useMemo(() => {
@@ -135,7 +211,7 @@ export const SegmentList: React.FC<SegmentListProps> = ({
       windowWithSpeech.SpeechRecognition || windowWithSpeech.webkitSpeechRecognition;
 
     if (!SpeechRecognitionClass) {
-      alert('Speech Recognition is not supported by your current browser.');
+      setDraftError('Microphone Speech Recognition is not supported by this browser.');
       return;
     }
 
@@ -233,6 +309,29 @@ export const SegmentList: React.FC<SegmentListProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Undo / Redo Actions */}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg border border-neutral-300 bg-white shadow-sm">
+            <button
+              onClick={onUndo}
+              disabled={!canUndo}
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-neutral-700 hover:text-black hover:bg-neutral-100 disabled:opacity-30 disabled:hover:bg-transparent transition"
+              title="Undo last segment modification (Ctrl+Z / ⌘Z)"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Undo</span>
+            </button>
+            <div className="w-px h-3.5 bg-neutral-200" />
+            <button
+              onClick={onRedo}
+              disabled={!canRedo}
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-neutral-700 hover:text-black hover:bg-neutral-100 disabled:opacity-30 disabled:hover:bg-transparent transition"
+              title="Redo segment modification (Ctrl+Y / ⌘Shift+Z)"
+            >
+              <Redo2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Redo</span>
+            </button>
+          </div>
+
           {/* Import Script TXT file */}
           <label className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-neutral-700 bg-white hover:bg-neutral-100 hover:text-black border border-neutral-300 cursor-pointer transition shadow-sm">
             <Upload className="w-3.5 h-3.5 text-neutral-500" />
@@ -254,6 +353,18 @@ export const SegmentList: React.FC<SegmentListProps> = ({
             <Tag className="w-3.5 h-3.5 text-neutral-500" />
             <span>Bulk Rename</span>
           </button>
+
+          {/* Extract Music (Batch / Per-Clip) */}
+          {onOpenMusicExtractor && (
+            <button
+              onClick={onOpenMusicExtractor}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-neutral-800 bg-white hover:bg-neutral-100 hover:text-black border border-neutral-300 transition shadow-sm"
+              title="Extract Music: strip background music & instrumentals to isolate clean speech (per-file and batch)"
+            >
+              <Music2 className="w-3.5 h-3.5 text-black" />
+              <span>Extract Music</span>
+            </button>
+          )}
 
           {/* Split by interval button */}
           <button
@@ -416,17 +527,66 @@ export const SegmentList: React.FC<SegmentListProps> = ({
                 </div>
               </div>
 
+              {/* Zoomed Segment Waveform & Precision Manual Cutting */}
+              {audioBuffer && (
+                <SegmentWaveformEditor
+                  audioBuffer={audioBuffer}
+                  segment={activeSegment}
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  isLooping={isLooping}
+                  onSeek={onSeek || (() => {})}
+                  onAddSplit={onAddSplit || ((t) => onSplitInHalf(activeSegment.id))}
+                  onUpdateSegmentTimes={onUpdateSegmentTimes}
+                  onPlaySegment={onPlaySegment}
+                  onStop={onStop}
+                />
+              )}
+
               {/* Master Transcription Editor Area */}
               <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <label className="text-neutral-800 font-medium flex items-center gap-2">
-                    <FileText className="w-3.5 h-3.5 text-neutral-600" />
-                    <span>Exact Spoken Transcript:</span>
-                  </label>
-                  <div className="flex items-center gap-3 text-neutral-500 font-mono text-[11px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <label className="text-neutral-800 font-medium flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-neutral-600" />
+                      <span>Exact Spoken Transcript:</span>
+                    </label>
+                    {/* Auto-Draft Toggle */}
+                    <button
+                      onClick={() => setAutoDraftOnClick(!autoDraftOnClick)}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border transition ${
+                        autoDraftOnClick
+                          ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                          : 'bg-neutral-100 text-neutral-500 border-neutral-200 hover:text-neutral-700'
+                      }`}
+                      title="Automatically fetch AI draft transcription when clicking into the text field"
+                    >
+                      <Sparkles className="w-3 h-3 text-amber-500" />
+                      <span>Auto-Draft: {autoDraftOnClick ? 'ON' : 'OFF'}</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-neutral-500 font-mono text-[11px]">
                     <span>{wordCount} words</span>
                     <span>·</span>
                     <span>{charCount} chars</span>
+
+                    {/* Manual AI Draft button */}
+                    <button
+                      onClick={() => handleGenerateDraft(activeSegment, activeSegment.text.trim().length === 0)}
+                      disabled={isDrafting || !audioBuffer}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-neutral-900 hover:bg-black text-white text-[11px] font-sans font-medium transition shadow-sm disabled:opacity-50"
+                      title="Generate preliminary draft transcription using AI"
+                    >
+                      {isDrafting ? (
+                        <Loader2 className="w-3 h-3 animate-spin text-amber-300" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 text-amber-300" />
+                      )}
+                      <span>{isDrafting ? 'Drafting...' : 'AI Draft'}</span>
+                    </button>
+
+                    {/* Speech Dictation */}
                     <button
                       onClick={handleVoiceDictation}
                       disabled={isDictating}
@@ -439,11 +599,105 @@ export const SegmentList: React.FC<SegmentListProps> = ({
                   </div>
                 </div>
 
+                {/* AI Drafting In-Progress Notice */}
+                {isDrafting && (
+                  <div className="flex items-center justify-between px-3 py-2 bg-neutral-900 text-white rounded-lg text-xs animate-pulse shadow-sm">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-3.5 h-3.5 text-amber-300 animate-spin" />
+                      <span>Listening & transcribing audio segment with AI...</span>
+                    </div>
+                    <span className="text-[10px] text-amber-300/80 font-mono">Web API</span>
+                  </div>
+                )}
+
+                {/* AI Draft Suggestion Card (if draft is available and differs from current text) */}
+                {draftGuess &&
+                  draftGuess.segmentId === activeSegment.id &&
+                  draftGuess.text !== activeSegment.text && (
+                    <div className="p-3 bg-amber-50/90 border border-amber-300/80 rounded-xl space-y-2 shadow-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2 min-w-0">
+                          <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[11px] font-semibold text-amber-900 uppercase tracking-wider">
+                                AI Draft Suggestion
+                              </span>
+                              {draftGuess.model && (
+                                <span className="text-[10px] text-amber-800 bg-amber-200/60 px-1.5 py-0.2 rounded font-mono">
+                                  {draftGuess.model}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-neutral-900 font-medium mt-1 leading-relaxed break-words">
+                              "{draftGuess.text}"
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2 pt-1 border-t border-amber-200/60">
+                        <button
+                          onClick={() => {
+                            onUpdateSegmentText(activeSegment.id, draftGuess.text);
+                            setAppliedDraftStatus(`Applied AI draft: "${draftGuess.text}"`);
+                            setTimeout(() => setAppliedDraftStatus(null), 3500);
+                          }}
+                          className="px-2.5 py-1 bg-black text-white hover:bg-neutral-800 rounded font-medium text-[11px] flex items-center gap-1 shadow-sm transition"
+                        >
+                          <Check className="w-3 h-3" />
+                          <span>Use This Draft</span>
+                        </button>
+                        <button
+                          onClick={() => setDraftGuess(null)}
+                          className="px-2 py-1 text-neutral-500 hover:text-neutral-700 text-[11px]"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {/* Applied Draft Success Banner */}
+                {appliedDraftStatus && (
+                  <div className="flex items-center justify-between text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg">
+                    <div className="flex items-center gap-1.5 truncate">
+                      <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span className="truncate">{appliedDraftStatus}</span>
+                    </div>
+                    <button
+                      onClick={() => setAppliedDraftStatus(null)}
+                      className="text-[10px] text-emerald-600 hover:text-emerald-900 ml-2 shrink-0"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {/* Draft Error / Offline Info Banner */}
+                {draftError && (
+                  <div className="flex items-center justify-between text-xs text-neutral-700 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg">
+                    <span className="truncate">{draftError}</span>
+                    <button
+                      onClick={() => setDraftError(null)}
+                      className="text-[10px] text-neutral-400 hover:text-black ml-2"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+
                 <textarea
                   rows={4}
                   value={activeSegment.text}
+                  onClick={handleTranscriptionFieldClick}
+                  onFocus={handleTranscriptionFieldClick}
                   onChange={(e) => onUpdateSegmentText(activeSegment.id, e.target.value)}
-                  placeholder="Type the exact transcript spoken in this audio slice..."
+                  placeholder={
+                    autoDraftOnClick
+                      ? "Click here to auto-draft speech with AI, or type the exact transcript..."
+                      : "Type the exact transcript spoken in this audio slice..."
+                  }
                   className="w-full bg-white border border-neutral-300 focus:border-black focus:ring-1 focus:ring-black rounded-xl p-3.5 text-sm text-neutral-900 placeholder-neutral-400 transition resize-y font-sans leading-relaxed shadow-sm"
                 />
 
@@ -484,6 +738,17 @@ export const SegmentList: React.FC<SegmentListProps> = ({
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Delete</span>
                 </button>
+
+                {onOpenMusicExtractor && (
+                  <button
+                    onClick={onOpenMusicExtractor}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-neutral-800 bg-neutral-100 hover:bg-neutral-200 hover:text-black border border-neutral-300 font-medium transition shadow-sm"
+                    title="Extract background music from this specific clip"
+                  >
+                    <Music2 className="w-3.5 h-3.5 text-black" />
+                    <span>Extract Music</span>
+                  </button>
+                )}
               </div>
 
               <div className="flex items-center gap-2">

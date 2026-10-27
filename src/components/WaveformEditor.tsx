@@ -11,6 +11,7 @@ import {
   Flame,
   Info,
   Waves,
+  Music2,
 } from 'lucide-react';
 import { AudioSegment } from '../types/audio';
 import { formatTime } from '../utils/wavEncoder';
@@ -29,6 +30,7 @@ interface WaveformEditorProps {
   onDeleteSplit: (index: number) => void;
   onAutoDetectSilence: () => void;
   onOpenDeReverb?: () => void;
+  onOpenMusicExtractor?: () => void;
 }
 
 export const WaveformEditor: React.FC<WaveformEditorProps> = ({
@@ -43,6 +45,7 @@ export const WaveformEditor: React.FC<WaveformEditorProps> = ({
   onDeleteSplit,
   onAutoDetectSilence,
   onOpenDeReverb,
+  onOpenMusicExtractor,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -577,6 +580,18 @@ export const WaveformEditor: React.FC<WaveformEditorProps> = ({
             >
               <Waves className="w-3.5 h-3.5 text-black" />
               <span>De-Reverb</span>
+            </button>
+          )}
+
+          {/* Extract Music & Vocal Isolation */}
+          {onOpenMusicExtractor && (
+            <button
+              onClick={onOpenMusicExtractor}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-neutral-100 hover:bg-neutral-200 text-neutral-900 border border-neutral-300 transition shadow-sm"
+              title="Extract Music: strip background music & instrumentals to isolate clean speech (per-file and batch)"
+            >
+              <Music2 className="w-3.5 h-3.5 text-black" />
+              <span>Extract Music</span>
             </button>
           )}
 

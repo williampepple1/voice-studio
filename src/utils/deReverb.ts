@@ -438,3 +438,80 @@ export async function createDeReverbPreview(
   await ctx.close();
   return { originalSlice, cleanedSlice };
 }
+
+/**
+ * Processes a batch of selected segments in-place within a new cloned AudioBuffer.
+ * Smoothly blends boundaries with micro-crossfades to prevent clicks.
+ */
+export async function batchDeReverbSegments(
+  audioBuffer: AudioBuffer,
+  segmentsToProcess: { id: string; startTime: number; endTime: number }[],
+  settings: DeReverbSettings = DEFAULT_DEREVERB_SETTINGS,
+  onProgress?: (progress: number, currentSegmentId: string, current: number, total: number) => void
+): Promise<AudioBuffer> {
+  const numChannels = audioBuffer.numberOfChannels;
+  const length = audioBuffer.length;
+  const sampleRate = audioBuffer.sampleRate;
+
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new AudioCtx();
+  const cleanBuffer = ctx.createBuffer(numChannels, length, sampleRate);
+
+  // Initialize with original audio data
+  for (let c = 0; c < numChannels; c++) {
+    cleanBuffer.getChannelData(c).set(audioBuffer.getChannelData(c));
+  }
+
+  const total = segmentsToProcess.length;
+  const fadeSamples = Math.min(Math.floor(sampleRate * 0.005), 128); // 5ms crossfade
+
+  for (let i = 0; i < total; i++) {
+    const seg = segmentsToProcess[i];
+    if (onProgress) {
+      onProgress(Math.round((i / total) * 100), seg.id, i + 1, total);
+    }
+    // Yield to browser UI thread
+    await new Promise((r) => setTimeout(r, 0));
+
+    const startSample = Math.max(0, Math.floor(seg.startTime * sampleRate));
+    const endSample = Math.min(length, Math.ceil(seg.endTime * sampleRate));
+    const segLen = endSample - startSample;
+
+    if (segLen > 100) {
+      for (let c = 0; c < numChannels; c++) {
+        const fullTrackData = cleanBuffer.getChannelData(c);
+        const originalTrackData = audioBuffer.getChannelData(c);
+        const sliceData = originalTrackData.subarray(startSample, endSample);
+
+        const cleanedSeg = deReverbChannel(sliceData, sampleRate, settings);
+
+        // Apply smooth boundary cross-fades with neighboring audio
+        if (fadeSamples > 0 && cleanedSeg.length > fadeSamples * 2) {
+          // Fade in from original at start boundary
+          for (let f = 0; f < fadeSamples; f++) {
+            const blend = f / fadeSamples;
+            cleanedSeg[f] = blend * cleanedSeg[f] + (1 - blend) * sliceData[f];
+          }
+          // Fade out to original at end boundary
+          for (let f = 0; f < fadeSamples; f++) {
+            const blend = f / fadeSamples;
+            const idx = cleanedSeg.length - 1 - f;
+            cleanedSeg[idx] = blend * cleanedSeg[idx] + (1 - blend) * sliceData[idx];
+          }
+        }
+
+        fullTrackData.set(cleanedSeg, startSample);
+      }
+    }
+  }
+
+  if (onProgress) {
+    onProgress(100, '', total, total);
+  }
+
+  await ctx.close();
+  return cleanBuffer;
+}
+

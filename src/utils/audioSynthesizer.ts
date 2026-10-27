@@ -17,30 +17,19 @@ export const DEMO_SENTENCES = [
  */
 export async function generateDemoAudioBuffer(
   audioCtx: AudioContext,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  includeMusic = false
 ): Promise<{ buffer: AudioBuffer; suggestedCuts: { start: number; end: number; text: string }[] }> {
-  onProgress?.("Synthesizing demo speech segments...");
+  onProgress?.(includeMusic ? "Synthesizing demo speech with background music..." : "Synthesizing demo speech segments...");
 
-  const sampleRate = audioCtx.sampleRate;
-  
-  // Try speech synthesis with MediaRecorder if supported
-  if ('speechSynthesis' in window && 'MediaStreamAudioDestinationNode' in window) {
-    try {
-      const result = await recordSpeechSynthesisTrack(audioCtx, onProgress);
-      if (result) return result;
-    } catch (err) {
-      console.warn("Speech synthesis recording fallback to acoustic model:", err);
-    }
-  }
-
-  // Pure Web Audio API acoustic vocal synthesis with natural formant curves & pauses
-  return generateAcousticSpeechTrack(audioCtx);
+  return generateAcousticSpeechTrack(audioCtx, includeMusic);
 }
 
 /**
- * Synthesizes vocal acoustic sentences with formant filter envelopes and pauses.
+ * Synthesizes vocal acoustic sentences with formant filter envelopes and pauses,
+ * with optional ambient background music bed for testing music extraction.
  */
-function generateAcousticSpeechTrack(audioCtx: AudioContext): {
+function generateAcousticSpeechTrack(audioCtx: AudioContext, includeMusic = false): {
   buffer: AudioBuffer;
   suggestedCuts: { start: number; end: number; text: string }[];
 } {
@@ -53,9 +42,11 @@ function generateAcousticSpeechTrack(audioCtx: AudioContext): {
     totalDuration += sentenceDurations[i] + pauseDuration;
   }
 
+  const numChannels = includeMusic ? 2 : 1;
   const numSamples = Math.floor(totalDuration * sampleRate);
-  const buffer = audioCtx.createBuffer(1, numSamples, sampleRate);
-  const data = buffer.getChannelData(0);
+  const buffer = audioCtx.createBuffer(numChannels, numSamples, sampleRate);
+  const leftData = buffer.getChannelData(0);
+  const rightData = includeMusic ? buffer.getChannelData(1) : leftData;
 
   const suggestedCuts: { start: number; end: number; text: string }[] = [];
 
@@ -108,10 +99,56 @@ function generateAcousticSpeechTrack(audioCtx: AudioContext): {
       // Add gentle consonant breath noise
       const consonantBurst = Math.sin(t * Math.PI * 7.6) > 0.8 ? (Math.random() * 2 - 1) * 0.15 : 0;
 
-      data[i] = (sample * 0.15 + consonantBurst) * syllableEnv * attackRelease;
+      const speechVal = (sample * 0.15 + consonantBurst) * syllableEnv * attackRelease;
+      leftData[i] = speechVal;
+      if (includeMusic) {
+        rightData[i] = speechVal;
+      }
     }
 
     currentTime = sEnd + pauseDuration;
+  }
+
+  // Layer background music bed across the entire track if requested
+  if (includeMusic) {
+    const chordFreqs = [
+      [220, 261.63, 329.63], // Am
+      [174.61, 220.0, 261.63], // F
+      [130.81, 164.81, 196.0], // C
+      [196.0, 246.94, 293.66], // G
+    ];
+
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const chordIdx = Math.floor(t / 2.4) % chordFreqs.length;
+      const freqs = chordFreqs[chordIdx];
+
+      // Piano / Synth Pad chords
+      const padL =
+        Math.sin(2 * Math.PI * freqs[0] * t) * 0.04 +
+        Math.sin(2 * Math.PI * freqs[1] * t) * 0.035;
+      const padR =
+        Math.sin(2 * Math.PI * freqs[1] * t) * 0.035 +
+        Math.sin(2 * Math.PI * freqs[2] * t) * 0.04;
+
+      // Bassline (80 Hz)
+      const bass = Math.sin(2 * Math.PI * (freqs[0] / 2) * t) * 0.05;
+
+      // Lo-fi rhythm beat: kick drum on downbeat (0.6s intervals)
+      const beatPhase = (t % 0.6) / 0.6;
+      const kick =
+        beatPhase < 0.2
+          ? Math.sin(2 * Math.PI * (70 - beatPhase * 35) * t) * (1 - beatPhase * 5) * 0.08
+          : 0;
+
+      // Hi-hat sizzle
+      const hatPhase = (t % 0.3) / 0.3;
+      const hat =
+        hatPhase < 0.08 ? (Math.random() * 2 - 1) * (1 - hatPhase * 12) * 0.025 : 0;
+
+      leftData[i] = Math.max(-0.98, Math.min(0.98, leftData[i] + padL * 0.8 + bass + kick + hat * 0.6));
+      rightData[i] = Math.max(-0.98, Math.min(0.98, rightData[i] + padR * 0.8 + bass + kick + hat * 0.9));
+    }
   }
 
   return { buffer, suggestedCuts };

@@ -25,6 +25,11 @@ export class AudioEngine {
   private playbackStartedAtAudioContextTime = 0;
   private playbackRate = 1.0;
   private volume = 1.0;
+  private autoGainEnabled = false;
+  private currentAutoGainMultiplier = 1.0;
+  private compressorNode: DynamicsCompressorNode | null = null;
+  private segmentsList: { id: string; startTime: number; endTime: number }[] = [];
+  private lastDetectedSegmentId: string | null = null;
 
   private loopRegion: { start: number; end: number } | null = null;
   private animationFrameId: number | null = null;
@@ -102,20 +107,47 @@ export class AudioEngine {
     source.buffer = this.currentBuffer;
     source.playbackRate.value = this.playbackRate;
 
+    // Check if playback starts inside a known segment to calibrate initial auto-gain
+    if (this.autoGainEnabled) {
+      const curSeg = this.segmentsList.find(s => this.startTimeOffset >= s.startTime && this.startTimeOffset <= s.endTime);
+      if (curSeg) {
+        this.currentAutoGainMultiplier = this.calculateSegmentAutoGain(curSeg.startTime, curSeg.endTime);
+      } else {
+        this.currentAutoGainMultiplier = 1.0;
+      }
+    } else {
+      this.currentAutoGainMultiplier = 1.0;
+    }
+
     // Gain node
     const gain = ctx.createGain();
-    gain.gain.value = this.volume;
+    this.updateEffectiveGain(gain, false);
     source.connect(gain);
+
+    // Dynamics compressor for transparent leveling and clipping prevention
+    const compressor = ctx.createDynamicsCompressor();
+    compressor.threshold.value = -20;
+    compressor.knee.value = 8;
+    compressor.ratio.value = 3.5;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.2;
 
     // Analyser node for real-time RMS amplitude & peak monitoring
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.2;
-    gain.connect(analyser);
+
+    if (this.autoGainEnabled) {
+      gain.connect(compressor);
+      compressor.connect(analyser);
+    } else {
+      gain.connect(analyser);
+    }
     analyser.connect(ctx.destination);
 
     this.sourceNode = source;
     this.gainNode = gain;
+    this.compressorNode = compressor;
     this.analyserNode = analyser;
 
     this.playbackStartedAtAudioContextTime = ctx.currentTime;
@@ -161,19 +193,41 @@ export class AudioEngine {
       source.loopEnd = validEnd;
     }
 
+    // Auto-Gain: calculate optimal normalizer gain for this specific segment
+    if (this.autoGainEnabled) {
+      this.currentAutoGainMultiplier = this.calculateSegmentAutoGain(validStart, validEnd);
+    } else {
+      this.currentAutoGainMultiplier = 1.0;
+    }
+
     const gain = ctx.createGain();
-    gain.gain.value = this.volume;
+    this.updateEffectiveGain(gain, false);
     source.connect(gain);
+
+    // Dynamics compressor for transparent leveling and clipping prevention
+    const compressor = ctx.createDynamicsCompressor();
+    compressor.threshold.value = -20;
+    compressor.knee.value = 8;
+    compressor.ratio.value = 3.5;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.2;
 
     // Analyser node for real-time RMS amplitude & peak monitoring
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.2;
-    gain.connect(analyser);
+
+    if (this.autoGainEnabled) {
+      gain.connect(compressor);
+      compressor.connect(analyser);
+    } else {
+      gain.connect(analyser);
+    }
     analyser.connect(ctx.destination);
 
     this.sourceNode = source;
     this.gainNode = gain;
+    this.compressorNode = compressor;
     this.analyserNode = analyser;
 
     this.playbackStartedAtAudioContextTime = ctx.currentTime;
@@ -259,8 +313,95 @@ export class AudioEngine {
 
   public setVolume(vol: number) {
     this.volume = Math.max(0, Math.min(1, vol));
-    if (this.gainNode) {
-      this.gainNode.gain.value = this.volume;
+    this.updateEffectiveGain(undefined, true);
+  }
+
+  public setAutoGain(enabled: boolean) {
+    this.autoGainEnabled = enabled;
+    if (this.isPlaying && this.currentBuffer) {
+      const cur = this.getCurrentTime();
+      const seg = this.segmentsList.find(s => cur >= s.startTime && cur <= s.endTime);
+      if (seg) {
+        this.currentAutoGainMultiplier = this.calculateSegmentAutoGain(seg.startTime, seg.endTime);
+      } else {
+        this.currentAutoGainMultiplier = 1.0;
+      }
+      this.updateEffectiveGain(undefined, true);
+    }
+  }
+
+  public isAutoGainEnabled(): boolean {
+    return this.autoGainEnabled;
+  }
+
+  public setSegments(segments: { id: string; startTime: number; endTime: number }[]) {
+    this.segmentsList = segments;
+  }
+
+  public getAutoGainMultiplier(): number {
+    return this.autoGainEnabled ? this.currentAutoGainMultiplier : 1.0;
+  }
+
+  public getAutoGainDb(): number {
+    if (!this.autoGainEnabled || Math.abs(this.currentAutoGainMultiplier - 1.0) < 0.05) return 0;
+    return Math.round(20 * Math.log10(this.currentAutoGainMultiplier) * 10) / 10;
+  }
+
+  public calculateSegmentAutoGain(startSec: number, endSec: number): number {
+    if (!this.currentBuffer) return 1.0;
+    const sampleRate = this.currentBuffer.sampleRate;
+    const startSample = Math.max(0, Math.floor(startSec * sampleRate));
+    const endSample = Math.min(this.currentBuffer.length, Math.ceil(endSec * sampleRate));
+    const totalSamples = endSample - startSample;
+    if (totalSamples < 100) return 1.0;
+
+    const step = Math.max(1, Math.floor(totalSamples / 1200));
+    let sumSquares = 0;
+    let peak = 0;
+    let count = 0;
+
+    const numChannels = this.currentBuffer.numberOfChannels;
+    for (let c = 0; c < numChannels; c++) {
+      const data = this.currentBuffer.getChannelData(c);
+      for (let i = startSample; i < endSample; i += step) {
+        const val = data[i];
+        const abs = Math.abs(val);
+        if (abs > peak) peak = abs;
+        sumSquares += val * val;
+        count++;
+      }
+    }
+
+    if (count === 0 || peak < 0.005) {
+      return 1.0;
+    }
+
+    const rms = Math.sqrt(sumSquares / count);
+    const targetRms = 0.125; // ~ -18 dB standard speech target RMS
+    const targetPeakCeiling = 0.84; // ~ -1.5 dB peak ceiling
+
+    let desiredGain = targetRms / Math.max(0.02, rms);
+    if (peak * desiredGain > targetPeakCeiling) {
+      desiredGain = targetPeakCeiling / peak;
+    }
+
+    // Clamp boost/cut between 0.35x (-9dB) and 3.5x (+11dB)
+    return Math.min(3.5, Math.max(0.35, desiredGain));
+  }
+
+  private updateEffectiveGain(targetNode?: GainNode, smooth = true) {
+    const g = targetNode || this.gainNode;
+    if (!g || !this.ctx) return;
+    const targetGain = this.volume * (this.autoGainEnabled ? this.currentAutoGainMultiplier : 1.0);
+    if (smooth && this.isPlaying) {
+      try {
+        g.gain.cancelScheduledValues(this.ctx.currentTime);
+        g.gain.setTargetAtTime(targetGain, this.ctx.currentTime, 0.04);
+      } catch (_) {
+        g.gain.value = targetGain;
+      }
+    } else {
+      g.gain.value = targetGain;
     }
   }
 
@@ -278,6 +419,14 @@ export class AudioEngine {
         // already stopped
       }
       this.sourceNode = null;
+    }
+    if (this.compressorNode) {
+      try {
+        this.compressorNode.disconnect();
+      } catch {
+        // already disconnected
+      }
+      this.compressorNode = null;
     }
     if (this.analyserNode) {
       try {
@@ -335,6 +484,21 @@ export class AudioEngine {
       if (!this.isPlaying) return;
       const current = this.getCurrentTime();
       this.notifyListeners(current, true);
+
+      // Dynamic Auto-Gain adjustment when crossing segment boundaries
+      if (this.autoGainEnabled && this.segmentsList.length > 0) {
+        const curSeg = this.segmentsList.find(s => current >= s.startTime && current <= s.endTime);
+        const curSegId = curSeg ? curSeg.id : null;
+        if (curSegId !== this.lastDetectedSegmentId) {
+          this.lastDetectedSegmentId = curSegId;
+          if (curSeg) {
+            this.currentAutoGainMultiplier = this.calculateSegmentAutoGain(curSeg.startTime, curSeg.endTime);
+          } else {
+            this.currentAutoGainMultiplier = 1.0;
+          }
+          this.updateEffectiveGain(undefined, true);
+        }
+      }
 
       // Check non-looping end
       if (!this.isLooping && this.currentBuffer && current >= this.currentBuffer.duration) {

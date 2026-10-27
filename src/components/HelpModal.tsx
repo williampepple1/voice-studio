@@ -68,6 +68,14 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
                 <span className="text-neutral-600">Next Clip</span>
                 <kbd className="px-1.5 py-0.5 bg-neutral-100 text-neutral-900 rounded border border-neutral-300">Ctrl + ]</kbd>
               </div>
+              <div className="flex items-center justify-between p-1.5 rounded bg-white border border-neutral-200">
+                <span className="text-neutral-600">Undo Action</span>
+                <kbd className="px-1.5 py-0.5 bg-neutral-100 text-neutral-900 rounded border border-neutral-300">Ctrl + Z / ⌘Z</kbd>
+              </div>
+              <div className="flex items-center justify-between p-1.5 rounded bg-white border border-neutral-200">
+                <span className="text-neutral-600">Redo Action</span>
+                <kbd className="px-1.5 py-0.5 bg-neutral-100 text-neutral-900 rounded border border-neutral-300">Ctrl + Y / ⌘⇧Z</kbd>
+              </div>
             </div>
           </div>
 
@@ -89,6 +97,12 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
               </li>
               <li>
                 <strong className="text-neutral-900">Continuous Loop Playback:</strong> Hit <kbd className="px-1 py-0.2 bg-black text-white font-mono text-[10px] rounded font-bold">L</kbd> to loop the active slice continuously while writing or proofreading transcript text.
+              </li>
+              <li>
+                <strong className="text-neutral-900">AI Draft Transcription:</strong> Clicking inside any unannotated segment's transcript field instantly queries Gemini AI via web API to propose a preliminary draft guess.
+              </li>
+              <li>
+                <strong className="text-neutral-900">Music Extraction & Vocal Isolator:</strong> Use the "Extract Music" tool to strip background music, beats, and soundtrack instrumentals from podcasts or video audio (available per clip, per file, or batch across external files and export).
               </li>
               <li>
                 <strong className="text-neutral-900">Export Standard Format:</strong> Packages individual 16-bit PCM Mono WAV clips alongside matching <code>.txt</code> files and LJSpeech <code>metadata.csv</code>.

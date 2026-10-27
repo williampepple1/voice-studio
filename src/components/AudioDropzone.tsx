@@ -1,9 +1,10 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, Sparkles, FileAudio, Check } from 'lucide-react';
+import { UploadCloud, Sparkles, FileAudio, Check, Music2 } from 'lucide-react';
 
 interface AudioDropzoneProps {
   onFileSelected: (file: File) => void;
   onLoadDemoTrack: () => void;
+  onLoadDemoWithMusic?: () => void;
   isLoading: boolean;
   loadingMessage?: string;
 }
@@ -11,6 +12,7 @@ interface AudioDropzoneProps {
 export const AudioDropzone: React.FC<AudioDropzoneProps> = ({
   onFileSelected,
   onLoadDemoTrack,
+  onLoadDemoWithMusic,
   isLoading,
   loadingMessage,
 }) => {
@@ -100,11 +102,22 @@ export const AudioDropzone: React.FC<AudioDropzoneProps> = ({
 
             <button
               onClick={onLoadDemoTrack}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border border-neutral-300 font-medium text-xs transition flex items-center justify-center gap-2 shadow-sm"
+              className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border border-neutral-300 font-medium text-xs transition flex items-center justify-center gap-2 shadow-sm"
             >
               <Sparkles className="w-3.5 h-3.5 text-neutral-600" />
-              <span>Load Demo Speech Track</span>
+              <span>Demo Speech</span>
             </button>
+
+            {onLoadDemoWithMusic && (
+              <button
+                onClick={onLoadDemoWithMusic}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border border-neutral-300 font-medium text-xs transition flex items-center justify-center gap-2 shadow-sm"
+                title="Load speech with background music track to test music extraction"
+              >
+                <Music2 className="w-3.5 h-3.5 text-black" />
+                <span>Demo with Music Bed</span>
+              </button>
+            )}
           </div>
 
           {/* Technical Specs */}

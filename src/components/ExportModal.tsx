@@ -70,6 +70,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             targetPeakDb: exportSettings.targetPeakDb,
             microFade: exportSettings.applyMicroFade,
             deReverb: exportSettings.applyDeReverb,
+            extractMusic: exportSettings.applyMusicExtraction,
           }
         );
 
@@ -270,6 +271,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   className="w-4 h-4 rounded bg-white border-neutral-300 text-black focus:ring-0 accent-black"
                 />
                 <span>Apply De-Reverberation (room reflection & echo suppression) to all exported clips</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer text-xs text-neutral-700">
+                <input
+                  type="checkbox"
+                  checked={exportSettings.applyMusicExtraction || false}
+                  onChange={(e) => onUpdateExportSettings({ applyMusicExtraction: e.target.checked })}
+                  className="w-4 h-4 rounded bg-white border-neutral-300 text-black focus:ring-0 accent-black"
+                />
+                <span>Extract & Strip Background Music (spectral vocal isolation on all exported clips)</span>
               </label>
 
               <label className="flex items-center gap-2 cursor-pointer text-xs text-neutral-700">
